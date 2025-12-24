@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Quadtree vs Brute Force</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; background: #f0f0f0; margin: 0; padding: 20px; box-sizing: border-box; }
+        h1 { margin: 0 0 20px 0; }
+        
+        /* Layout Controls */
+        .layout-controls { margin-bottom: 20px; display: flex; gap: 10px; align-items: center; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .view-btn { padding: 8px 16px; border: 1px solid #ccc; background: #f8f9fa; cursor: pointer; border-radius: 4px; font-weight: 500; }
+        .view-btn.active { background: #007bff; color: white; border-color: #007bff; }
+        
+        /* Grid Layout */
+        .simulation-grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 20px; 
+            width: 100%; 
+            max-width: 1300px; 
+        }
+        
+        /* Single Simulation Container */
+        .sim-container { position: relative; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); display: flex; flex-direction: column; align-items: center; }
+        
+        h2 { margin: 10px 0; font-size: 18px; color: #444; }
+        .tag { font-size: 12px; padding: 2px 8px; border-radius: 10px; color: white; margin-left: 10px; vertical-align: middle; }
+        .tag.fast { background: #28a745; }
+        .tag.slow { background: #dc3545; }
+
+        canvas { background: white; cursor: crosshair; display: block; border: 1px solid #ddd; }
+        
+        /* HUD overlay */
+        .hud { 
+            position: absolute; top: 50px; left: 20px; 
+            background: rgba(255, 255, 255, 0.95); padding: 12px; 
+            border-radius: 6px; pointer-events: none;
+            font-size: 13px; color: #333;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            min-width: 140px;
+        }
+
+        .controls { margin-top: 20px; display: flex; gap: 10px; }
+        button.action-btn { padding: 10px 20px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: 600; transition: background 0.2s; }
+        button.action-btn:hover { background: #0056b3; }
+        button.secondary { background: #6c757d; }
+        button.secondary:hover { background: #545b62; }
+        button.stress { background: #dc3545; border-color: #dc3545; }
+        button.stress:hover { background: #c82333; }
+        
+        /* Red blocked indicator */
+        .blocked-indicator {
+            position: absolute; pointer-events: none; 
+            border: 2px solid red; background: rgba(255,0,0,0.2);
+            display: none; z-index: 10;
+        }
+
+        /* --- View Modes --- */
+        .simulation-grid.mode-quad .sim-brute { display: none; }
+        .simulation-grid.mode-quad { grid-template-columns: 1fr; max-width: 650px; }
+        
+        .simulation-grid.mode-brute .sim-quad { display: none; }
+        .simulation-grid.mode-brute { grid-template-columns: 1fr; max-width: 650px; }
+
+    </style>
+</head>
+<body>
+
+<h1>Physics Engine Comparison</h1>
+
+<div class="layout-controls">
+    <span>View:</span>
+    <button class="view-btn active" onclick="setView('split', this)">Split View</button>
+    <button class="view-btn" onclick="setView('quad', this)">Quadtree Only</button>
+    <button class="view-btn" onclick="setView('brute', this)">Brute Force Only</button>
+</div>
+
+<div class="simulation-grid" id="gridContainer">
+    
+    <div class="sim-container sim-quad">
+        <h2>Quadtree Implementation <span class="tag fast">O(N log N)</span></h2>
+        <div style="position: relative;">
+            <canvas id="canvas_qt" width="600" height="600"></canvas>
+            <div id="indicator_qt" class="blocked-indicator"></div>
+            <div class="hud">
+                <div><strong>Stats</strong></div>
+                <div>Objects: <span id="count_qt">0</span></div>
+                <div>Checks: <span id="checks_qt">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="sim-container sim-brute">
+        <h2>Brute Force Implementation <span class="tag slow">O(N²)</span></h2>
+        <div style="position: relative;">
+            <canvas id="canvas_bf" width="600" height="600"></canvas>
+            <div id="indicator_bf" class="blocked-indicator"></div>
+            <div class="hud">
+                <div><strong>Stats</strong></div>
+                <div>Objects: <span id="count_bf">0</span></div>
+                <div>Checks: <span id="checks_bf">0</span></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="controls">
+    <button class="action-btn" onclick="togglePause()" id="pauseBtn">Pause</button>
+    <button class="action-btn secondary" onclick="resetAll()">Reset</button>
+    <button class="action-btn stress" onclick="stressTest()">Stress Test (400)</button>
+</div>
+
+<div style="margin-top: 10px; color: #666; font-size: 14px;">
+    <strong>Left Click:</strong> Spawn Particle &nbsp;|&nbsp; <strong>Right Click:</strong> Place Wall
+</div>
+
+<script>
+    // Config
+    const BOUNDS = { x: 0, y: 0, w: 600, h: 600 };
+    const CAPACITY = 4;
+    const BLOCK_SIZE = 40;
+    const PARTICLE_SIZE = 16;
+    const RESTITUTION = 0.9; 
+
+    // Global State
+    let isPaused = false;
+    let instances = []; 
+
+    // --- Physics Instance Class ---
+    class PhysicsInstance {
+        constructor(type, canvasId, indicatorId, countId, checksId) {
+            this.type = type; // 'quadtree' or 'bruteforce'
+            this.canvas = document.getElementById(canvasId);
+            this.ctx = this.canvas.getContext('2d', { alpha: false });
+            this.indicator = document.getElementById(indicatorId);
+            
+            // DOM Elements for Stats
+            this.elCount = document.getElementById(countId);
+            this.elChecks = document.getElementById(checksId);
+
+            // Simulation State
+            this.particles = [];
+            this.qt = null; // Only used if type === 'quadtree'
+            this.mouse = { x: 0, y: 0, isOver: false };
+
+            // Bind Events
+            this.setupEvents();
+        }
+
+        setupEvents() {
+            this.canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+            // Track Mouse
+            this.canvas.addEventListener('mousemove', e => {
+                const rect = this.canvas.getBoundingClientRect();
+                this.mouse.x = e.clientX - rect.left;
+                this.mouse.y = e.clientY - rect.top;
+                this.mouse.isOver = true;
+            });
+
+            this.canvas.addEventListener('mouseleave', () => {
+                this.mouse.isOver = false;
+                this.indicator.style.display = 'none';
+            });
+
+            // Handle Input (Applies to ALL instances)
+            this.canvas.addEventListener('mousedown', e => {
+                const isWall = e.button === 2; // Right click
+                
+                const x = this.mouse.x;
+                const y = this.mouse.y;
+
+                if (isWall) {
+                    instances.forEach(inst => inst.tryPlaceWall(x, y));
+                } else {
+                    // GENERATE RANDOM VALUES ONCE
+                    const vx = (Math.random() - 0.5) * 6;
+                    const vy = (Math.random() - 0.5) * 6;
+                    const color = `hsl(${Math.random()*360}, 70%, 50%)`;
+
+                    instances.forEach(inst => inst.spawnParticle(x, y, vx, vy, color));
+                }
+            });
+        }
+
+        update() {
+            if (isPaused) return;
+
+            this.updatePhysics();
+
+            let checks = 0;
+            if (this.type === 'quadtree') {
+                this.rebuildTree();
+                checks = this.resolveQuadtree();
+            } else {
+                checks = this.resolveBruteForce();
+            }
+
+            this.elChecks.innerText = checks;
+        }
+
+        draw() {
+            this.updateHoverLogic();
+
+            this.ctx.fillStyle = '#ffffff';
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+            if (this.type === 'quadtree' && this.qt) {
+                let regions = this.qt.getAllRegions();
+                this.ctx.strokeStyle = '#f0f0f0';
+                this.ctx.lineWidth = 1;
+                for(let i=0; i<regions.size(); i++) {
+                    let r = regions.get(i);
+                    this.ctx.strokeRect(r.x, r.y, r.w, r.h);
+                }
+                regions.delete();
+            }
+
+            this.particles.forEach(p => {
+                this.ctx.fillStyle = p.color;
+                this.ctx.fillRect(p.x, p.y, p.w, p.h);
+                this.ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+                this.ctx.lineWidth = 1;
+                this.ctx.strokeRect(p.x, p.y, p.w, p.h);
+            });
+        }
+
+        // --- Logic ---
+
+        updatePhysics() {
+            this.particles.forEach(p => {
+                if (p.static) return;
+                p.x += p.vx;
+                p.y += p.vy;
+
+                if (p.x <= 0) { p.x = 0; p.vx *= -1; }
+                if (p.x + p.w >= BOUNDS.w) { p.x = BOUNDS.w - p.w; p.vx *= -1; }
+                if (p.y <= 0) { p.y = 0; p.vy *= -1; }
+                if (p.y + p.h >= BOUNDS.h) { p.y = BOUNDS.h - p.h; p.vy *= -1; }
+            });
+        }
+
+        rebuildTree() {
+            if (this.qt) this.qt.delete();
+            this.qt = new Module.Quadtree(BOUNDS, CAPACITY);
+            this.particles.forEach((p, index) => {
+                let box = { x: p.x, y: p.y, w: p.w, h: p.h };
+                this.qt.insert(box, index);
+            });
+            this.elCount.innerText = this.particles.length;
+        }
+
+        resolveQuadtree() {
+            let pairChecks = 0;
+            for (let i = 0; i < this.particles.length; i++) {
+                let p1 = this.particles[i];
+                let queryBox = { x: p1.x - 2, y: p1.y - 2, w: p1.w + 4, h: p1.h + 4 };
+                let neighbors = this.qt.query_region(queryBox);
+                
+                let count = neighbors.size();
+                for (let j = 0; j < count; j++) {
+                    let elem = neighbors.get(j);
+                    let otherIdx = elem.data;
+                    if (i < otherIdx) { 
+                        pairChecks++;
+                        solveAABBCollision(this.particles[i], this.particles[otherIdx]);
+                    }
+                }
+                neighbors.delete();
+            }
+            return pairChecks;
+        }
+
+        resolveBruteForce() {
+            this.elCount.innerText = this.particles.length;
+            let pairChecks = 0;
+            for (let i = 0; i < this.particles.length; i++) {
+                for (let j = i + 1; j < this.particles.length; j++) {
+                    pairChecks++;
+                    solveAABBCollision(this.particles[i], this.particles[j]);
+                }
+            }
+            return pairChecks;
+        }
+
+        updateHoverLogic() {
+            if (!this.mouse.isOver) return;
+
+            const size = BLOCK_SIZE;
+            const x = this.mouse.x - size/2;
+            const y = this.mouse.y - size/2;
+            const candidate = {x, y, w:size, h:size};
+            
+            let isBlocked = false;
+
+            if (this.type === 'quadtree' && this.qt) {
+                let neighbors = this.qt.query_region(candidate);
+                if(neighbors.size() > 0) isBlocked = true;
+                neighbors.delete();
+            } else {
+                for(let p of this.particles) {
+                    if (checkOverlap(candidate, p)) {
+                        isBlocked = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isBlocked) {
+                this.indicator.style.display = 'block';
+                this.indicator.style.width = size + 'px';
+                this.indicator.style.height = size + 'px';
+                this.indicator.style.left = x + 'px';
+                this.indicator.style.top = y + 'px';
+            } else {
+                this.indicator.style.display = 'none';
+            }
+        }
+
+        tryPlaceWall(x, y) {
+            const size = BLOCK_SIZE;
+            const box = { x: x - size/2, y: y - size/2, w: size, h: size };
+            
+            let blocked = false;
+            for(let p of this.particles) {
+                if (checkOverlap(box, p)) { blocked = true; break; }
+            }
+            
+            if (!blocked) {
+                this.particles.push({
+                    x: box.x, y: box.y, w: size, h: size,
+                    vx: 0, vy: 0, static: true, color: '#333'
+                });
+            }
+        }
+
+        spawnParticle(x, y, vx, vy, color) {
+            this.particles.push({
+                x: x - PARTICLE_SIZE/2,
+                y: y - PARTICLE_SIZE/2,
+                w: PARTICLE_SIZE,
+                h: PARTICLE_SIZE,
+                vx: vx,
+                vy: vy,
+                static: false,
+                color: color
+            });
+        }
+        
+        reset() {
+            this.particles = [];
+            if(this.qt) { this.qt.delete(); this.qt = new Module.Quadtree(BOUNDS, CAPACITY); }
+        }
+    }
+
+    // --- Shared Math ---
+    
+    function checkOverlap(r1, r2) {
+        return r1.x < r2.x + r2.w && r1.x + r1.w > r2.x &&
+               r1.y < r2.y + r2.h && r1.y + r1.h > r2.y;
+    }
+
+    function solveAABBCollision(p1, p2) {
+        let dx = (p2.x + p2.w/2) - (p1.x + p1.w/2);
+        let dy = (p2.y + p2.h/2) - (p1.y + p1.h/2);
+        let combinedHalfW = (p1.w/2) + (p2.w/2);
+        let combinedHalfH = (p1.h/2) + (p2.h/2);
+        let overlapX = combinedHalfW - Math.abs(dx);
+        let overlapY = combinedHalfH - Math.abs(dy);
+
+        if (overlapX > 0 && overlapY > 0) {
+            let normalX = 0, normalY = 0;
+            if (overlapX < overlapY) {
+                normalX = dx > 0 ? 1 : -1;
+                if (p1.static) p2.x += normalX * overlapX;
+                else if (p2.static) p1.x -= normalX * overlapX;
+                else { p1.x -= normalX * overlapX * 0.5; p2.x += normalX * overlapX * 0.5; }
+                
+                if(!p1.static && !p2.static) {
+                    let v1 = p1.vx, v2 = p2.vx;
+                    p1.vx = v2 * RESTITUTION; p2.vx = v1 * RESTITUTION;
+                } else if (!p1.static && p2.static) p1.vx *= -RESTITUTION;
+                else if (p1.static && !p2.static) p2.vx *= -RESTITUTION;
+
+            } else {
+                normalY = dy > 0 ? 1 : -1;
+                if (p1.static) p2.y += normalY * overlapY;
+                else if (p2.static) p1.y -= normalY * overlapY;
+                else { p1.y -= normalY * overlapY * 0.5; p2.y += normalY * overlapY * 0.5; }
+
+                if(!p1.static && !p2.static) {
+                    let v1 = p1.vy, v2 = p2.vy;
+                    p1.vy = v2 * RESTITUTION; p2.vy = v1 * RESTITUTION;
+                } else if (!p1.static && p2.static) p1.vy *= -RESTITUTION;
+                else if (p1.static && !p2.static) p2.vy *= -RESTITUTION;
+            }
+        }
+    }
+
+    // --- Main ---
+
+    var Module = {
+        onRuntimeInitialized: function() {
+            // Remove the FPS ID arguments
+            instances.push(new PhysicsInstance('quadtree', 'canvas_qt', 'indicator_qt', 'count_qt', 'checks_qt'));
+            instances.push(new PhysicsInstance('bruteforce', 'canvas_bf', 'indicator_bf', 'count_bf', 'checks_bf'));
+            requestAnimationFrame(masterLoop);
+        }
+    };
+
+    function masterLoop(timestamp) {
+        instances.forEach(inst => {
+            inst.update(); // No timestamp needed
+            inst.draw();
+        });
+        requestAnimationFrame(masterLoop);
+    }
+
+    // --- UI Controls ---
+
+    function setView(mode, btn) {
+        document.getElementById('gridContainer').className = 'simulation-grid mode-' + mode;
+        document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+        if(btn) btn.classList.add('active');
+        else if (mode === 'split') document.querySelector('.view-btn:first-child').classList.add('active');
+    }
+
+    function togglePause() {
+        isPaused = !isPaused;
+        document.getElementById('pauseBtn').innerText = isPaused ? "Resume" : "Pause";
+    }
+
+    function resetAll() {
+        instances.forEach(i => i.reset());
+    }
+
+    function stressTest() {
+        for(let i=0; i<400; i++) {
+            let x = 50 + Math.random() * 500;
+            let y = 50 + Math.random() * 500;
+            const vx = (Math.random() - 0.5) * 6;
+            const vy = (Math.random() - 0.5) * 6;
+            const color = `hsl(${Math.random()*360}, 70%, 50%)`;
+            instances.forEach(inst => inst.spawnParticle(x, y, vx, vy, color));
+        }
+    }
+
+</script>
+<script src="quadtree.js"></script>
+</body>
+</html>
